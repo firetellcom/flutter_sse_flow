@@ -1,7 +1,8 @@
 name: flutter_sse_flow
-description: "A new Flutter package project."
+description: "A robust Server-Sent Events (SSE) client for Flutter, featuring automatic reconnections, stream parsing, and OIDC automated publishing."
 version: 0.0.1
-homepage:
+homepage: https://github.com/firetellcom/flutter_sse_flow
+repository: https://github.com/firetellcom/flutter_sse_flow
 
 environment:
   sdk: ^3.11.1
