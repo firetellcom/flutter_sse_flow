@@ -1,3 +1,9 @@
+## 0.0.2
+
+* Updated `README.md` with comprehensive, separate English and Vietnamese documentation sections.
+* Added detailed API reference tables and usage examples.
+* Cleaned up test imports for `flutter analyze` compliance.
+
 ## 0.0.1
 
 * Initial release of `flutter_sse_flow`.
