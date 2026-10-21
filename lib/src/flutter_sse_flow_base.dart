@@ -21,10 +21,22 @@ import 'sse_session.dart';
 class FlutterSseFlow {
   FlutterSseFlow({
     this.reconnectDelay = const Duration(seconds: 2),
-  });
+    this.maxAuthRetries = 10,
+  }) : assert(maxAuthRetries >= 0, 'maxAuthRetries must not be negative');
 
   /// Delay between reconnection attempts.
   final Duration reconnectDelay;
+
+  /// Maximum number of consecutive `onUnauthorized` recoveries before the
+  /// client gives up and moves to [SseConnectionStatus.unauthorized].
+  ///
+  /// The counter resets after every successful (2xx) connection, so it only
+  /// limits back-to-back rejections, e.g. a server that keeps refusing
+  /// freshly refreshed credentials. The first recovery reconnects
+  /// immediately; subsequent ones wait [reconnectDelay] first.
+  ///
+  /// Set to `0` to never call `onUnauthorized`.
+  final int maxAuthRetries;
 
   final StreamController<SSEModel> _sseStreamController =
       StreamController<SSEModel>.broadcast();
@@ -78,7 +90,8 @@ class FlutterSseFlow {
   /// ```
   ///
   /// [onUnauthorized] is invoked whenever the response status is in
-  /// [unauthorizedStatusCodes] (defaults to `{401}`).
+  /// [unauthorizedStatusCodes] (defaults to `{401}`), at most
+  /// [maxAuthRetries] times in a row.
   ///
   /// [unauthorizedStatusCodes] specifies which HTTP status codes represent
   /// expired or invalid credentials (defaults to `{401}`).
@@ -120,6 +133,8 @@ class FlutterSseFlow {
     required SseUnauthorizedHandler? onUnauthorized,
     required Set<int> unauthorizedStatusCodes,
   }) async {
+    int authRetries = 0;
+
     while (!session.isCancelled) {
       try {
         final Map<String, String> requestHeaders = await _resolveHeaders(
@@ -136,10 +151,18 @@ class FlutterSseFlow {
         if (session.isCancelled) break;
 
         if (unauthorizedStatusCodes.contains(statusCode)) {
-          if (onUnauthorized == null) {
+          if (onUnauthorized == null || authRetries >= maxAuthRetries) {
             _updateStatus(SseConnectionStatus.unauthorized);
             session.cancel();
             break;
+          }
+
+          // The first recovery is immediate; repeated ones are spaced out so
+          // a server that keeps rejecting fresh credentials is not flooded.
+          if (authRetries > 0) {
+            _updateStatus(SseConnectionStatus.reconnecting);
+            await Future<void>.delayed(reconnectDelay);
+            if (session.isCancelled) break;
           }
 
           _updateStatus(SseConnectionStatus.refreshingAuth);
@@ -152,9 +175,15 @@ class FlutterSseFlow {
             break;
           }
 
-          // SseAuthDecision.retry: reconnect immediately with fresh headers.
+          // SseAuthDecision.retry: reconnect with fresh headers.
+          authRetries++;
           _updateStatus(SseConnectionStatus.connecting);
           continue;
+        }
+
+        // Only a successful connection proves the credentials are valid.
+        if (statusCode >= 200 && statusCode < 300) {
+          authRetries = 0;
         }
 
         if (session.isCancelled) break;

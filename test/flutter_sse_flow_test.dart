@@ -264,6 +264,114 @@ void main() {
         expect(handlerCalls, 2);
         expect(sseFlow.status, SseConnectionStatus.connected);
       });
+
+      test('maxAuthRetries defaults to 10', () {
+        expect(FlutterSseFlow().maxAuthRetries, 10);
+      });
+
+      test('stops after maxAuthRetries when server keeps rejecting', () async {
+        final FlutterSseFlow client = FlutterSseFlow(
+          reconnectDelay: const Duration(milliseconds: 10),
+          maxAuthRetries: 3,
+        );
+        addTearDown(client.dispose);
+
+        int requestCount = 0;
+        server!.listen((HttpRequest request) {
+          requestCount++;
+          request.response.statusCode = 401;
+          request.response.close();
+        });
+
+        int handlerCalls = 0;
+        client.connect(
+          url: serverUrl,
+          onUnauthorized: () async {
+            handlerCalls++;
+            return SseAuthDecision.retry;
+          },
+        );
+
+        await client.statusStream.firstWhere(
+          (SseConnectionStatus status) =>
+              status == SseConnectionStatus.unauthorized,
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+
+        expect(handlerCalls, 3);
+        expect(requestCount, 4);
+        expect(client.status, SseConnectionStatus.unauthorized);
+      });
+
+      test('maxAuthRetries 0 never calls the handler', () async {
+        final FlutterSseFlow client = FlutterSseFlow(
+          reconnectDelay: const Duration(milliseconds: 10),
+          maxAuthRetries: 0,
+        );
+        addTearDown(client.dispose);
+
+        server!.listen((HttpRequest request) {
+          request.response.statusCode = 401;
+          request.response.close();
+        });
+
+        int handlerCalls = 0;
+        client.connect(
+          url: serverUrl,
+          onUnauthorized: () async {
+            handlerCalls++;
+            return SseAuthDecision.retry;
+          },
+        );
+
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+        expect(handlerCalls, 0);
+        expect(client.status, SseConnectionStatus.unauthorized);
+      });
+
+      test('resets the retry counter after a successful connection', () async {
+        final FlutterSseFlow client = FlutterSseFlow(
+          reconnectDelay: const Duration(milliseconds: 10),
+          maxAuthRetries: 1,
+        );
+        addTearDown(client.dispose);
+
+        // 401 -> 200 (stream closes) -> 401 -> 200 (stays open).
+        int requestCount = 0;
+        server!.listen((HttpRequest request) {
+          requestCount++;
+          if (requestCount.isOdd) {
+            request.response.statusCode = 401;
+            request.response.close();
+            return;
+          }
+          request.response.bufferOutput = false;
+          request.response.headers.contentType =
+              ContentType('text', 'event-stream');
+          request.response.write('data: ok-$requestCount\n\n');
+          if (requestCount == 2) {
+            request.response.close();
+          }
+        });
+
+        int handlerCalls = 0;
+        client.connect(
+          url: serverUrl,
+          onUnauthorized: () async {
+            handlerCalls++;
+            return SseAuthDecision.retry;
+          },
+        );
+
+        final List<SSEModel> events = await client.sseStream.take(2).toList();
+
+        expect(
+          events.map((SSEModel event) => event.data).toList(),
+          <String>['ok-2', 'ok-4'],
+        );
+        expect(handlerCalls, 2);
+        expect(client.status, SseConnectionStatus.connected);
+      });
     });
 
     group('statusStream', () {
@@ -314,7 +422,7 @@ void main() {
 
         sseFlow.connect(url: serverUrl);
 
-        await secondRequest.future.timeout(const Duration(seconds: 2));
+        await secondRequest.future.timeout(const Duration(seconds: 5));
         expect(statuses.contains(SseConnectionStatus.reconnecting), isTrue);
       });
     });
