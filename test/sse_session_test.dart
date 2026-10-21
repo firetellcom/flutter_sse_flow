@@ -1,4 +1,4 @@
-import 'package:flutter_sse_flow/flutter_sse_flow.dart';
+import 'package:flutter_sse_flow/src/sse_session.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 
