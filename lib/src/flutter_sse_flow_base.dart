@@ -7,6 +7,7 @@ import 'sse_auth.dart';
 import 'sse_connection_status.dart';
 import 'sse_event_parser.dart';
 import 'sse_model.dart';
+import 'sse_session.dart';
 
 /// A robust client for Server-Sent Events (SSE).
 ///
@@ -30,7 +31,7 @@ class FlutterSseFlow {
   final StreamController<SseConnectionStatus> _statusController =
       StreamController<SseConnectionStatus>.broadcast();
   SseConnectionStatus _status = SseConnectionStatus.idle;
-  http.Client? _client;
+  SseSession? _session;
   String? _lastEventId;
 
   /// Current connection lifecycle status.
@@ -94,13 +95,17 @@ class FlutterSseFlow {
     if (_sseStreamController.isClosed) {
       throw StateError('Cannot connect a disposed FlutterSseFlow instance.');
     }
-    if (_status.isActive) return;
+    if (_session != null && !_session!.isCancelled) return;
 
     _lastEventId = null;
+
+    final SseSession session = SseSession();
+    _session = session;
 
     _updateStatus(SseConnectionStatus.connecting);
 
     _connectInternal(
+      session: session,
       url: url,
       headersProvider: headers,
       onUnauthorized: onUnauthorized,
@@ -109,37 +114,41 @@ class FlutterSseFlow {
   }
 
   Future<void> _connectInternal({
+    required SseSession session,
     required String url,
     required SseHeadersProvider? headersProvider,
     required SseUnauthorizedHandler? onUnauthorized,
     required Set<int> unauthorizedStatusCodes,
   }) async {
-    while (_status.isActive) {
+    while (!session.isCancelled) {
       try {
         final Map<String, String> requestHeaders = await _resolveHeaders(
           headersProvider,
         );
-        if (!_status.isActive) break;
+        if (session.isCancelled) break;
 
         final int statusCode = await _connectAndListen(
+          session: session,
           url: url,
           headers: requestHeaders,
           unauthorizedStatusCodes: unauthorizedStatusCodes,
         );
-        if (!_status.isActive) break;
+        if (session.isCancelled) break;
 
         if (unauthorizedStatusCodes.contains(statusCode)) {
           if (onUnauthorized == null) {
             _updateStatus(SseConnectionStatus.unauthorized);
+            session.cancel();
             break;
           }
 
           _updateStatus(SseConnectionStatus.refreshingAuth);
           final SseAuthDecision decision = await onUnauthorized();
-          if (!_status.isActive) break;
+          if (session.isCancelled) break;
 
           if (decision == SseAuthDecision.stop) {
             _updateStatus(SseConnectionStatus.unauthorized);
+            session.cancel();
             break;
           }
 
@@ -148,19 +157,17 @@ class FlutterSseFlow {
           continue;
         }
 
-        if (!_status.isActive) break;
+        if (session.isCancelled) break;
         _updateStatus(SseConnectionStatus.reconnecting);
         await Future<void>.delayed(reconnectDelay);
-        if (_status.isActive) {
-          _updateStatus(SseConnectionStatus.connecting);
-        }
+        if (session.isCancelled) break;
+        _updateStatus(SseConnectionStatus.connecting);
       } catch (e) {
-        if (_status.isActive) {
+        if (!session.isCancelled) {
           _updateStatus(SseConnectionStatus.reconnecting);
           await Future<void>.delayed(reconnectDelay);
-          if (_status.isActive) {
-            _updateStatus(SseConnectionStatus.connecting);
-          }
+          if (session.isCancelled) break;
+          _updateStatus(SseConnectionStatus.connecting);
         }
       }
     }
@@ -190,12 +197,13 @@ class FlutterSseFlow {
   /// [unauthorizedStatusCodes] or non-2xx codes, the body is not consumed as
   /// an SSE stream.
   Future<int> _connectAndListen({
+    required SseSession session,
     required String url,
     required Map<String, String> headers,
     required Set<int> unauthorizedStatusCodes,
   }) async {
     final http.Client client = http.Client();
-    _client = client;
+    session.client = client;
 
     try {
       final http.Request request = http.Request('GET', Uri.parse(url));
@@ -213,6 +221,7 @@ class FlutterSseFlow {
         return response.statusCode;
       }
 
+      if (session.isCancelled) return response.statusCode;
       _updateStatus(SseConnectionStatus.connected);
 
       final Stream<SSEModel> events = response.stream
@@ -221,7 +230,7 @@ class FlutterSseFlow {
           .transform(const SseEventParser());
 
       await for (final SSEModel event in events) {
-        if (!_status.isActive) break;
+        if (session.isCancelled) break;
         if (event.id.isNotEmpty) {
           _lastEventId = event.id;
         }
@@ -232,8 +241,8 @@ class FlutterSseFlow {
       return response.statusCode;
     } finally {
       client.close();
-      if (identical(_client, client)) {
-        _client = null;
+      if (identical(session.client, client)) {
+        session.client = null;
       }
     }
   }
@@ -241,8 +250,8 @@ class FlutterSseFlow {
   /// Disconnects the active SSE stream and releases allocated resources.
   void disconnect() {
     _updateStatus(SseConnectionStatus.disconnected);
-    _client?.close();
-    _client = null;
+    _session?.cancel();
+    _session = null;
   }
 
   /// Disconnects the active SSE stream and closes all stream controllers.

@@ -420,5 +420,86 @@ void main() {
         );
       });
     });
+
+    group('SseSession concurrency and race prevention', () {
+      test(
+          'disconnect then connect back-to-back cancels old loop and does not duplicate events',
+          () async {
+        final List<HttpResponse> openResponses = <HttpResponse>[];
+        server!.listen((HttpRequest request) {
+          request.response.bufferOutput = false;
+          request.response.headers.contentType =
+              ContentType('text', 'event-stream');
+          request.response.write(': open\n\n');
+          openResponses.add(request.response);
+        });
+
+        sseFlow.connect(url: serverUrl);
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+
+        sseFlow.disconnect();
+        sseFlow.connect(url: serverUrl);
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+
+        int received = 0;
+        final StreamSubscription<SSEModel> sub =
+            sseFlow.sseStream.listen((SSEModel e) {
+          if (e.data == 'MSG') received++;
+        });
+
+        for (final HttpResponse r in openResponses) {
+          r.write('event: sms\ndata: MSG\n\n');
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        await sub.cancel();
+
+        expect(received, 1);
+      });
+
+      test(
+          'disconnect and connect while sleeping in reconnectDelay terminates old loop cleanly',
+          () async {
+        int requestCount = 0;
+        final List<HttpResponse> openResponses = <HttpResponse>[];
+        server!.listen((HttpRequest request) {
+          requestCount++;
+          request.response.bufferOutput = false;
+          request.response.headers.contentType =
+              ContentType('text', 'event-stream');
+          if (requestCount == 1) {
+            request.response.close();
+            return;
+          }
+          request.response.write(': open\n\n');
+          openResponses.add(request.response);
+        });
+
+        final FlutterSseFlow localSse = FlutterSseFlow(
+          reconnectDelay: const Duration(milliseconds: 150),
+        );
+        localSse.connect(url: serverUrl);
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+
+        localSse.disconnect();
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        localSse.connect(url: serverUrl);
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+
+        int received = 0;
+        final StreamSubscription<SSEModel> sub =
+            localSse.sseStream.listen((SSEModel e) {
+          if (e.data == 'MSG') received++;
+        });
+
+        for (final HttpResponse r in openResponses) {
+          r.write('event: sms\ndata: MSG\n\n');
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        await sub.cancel();
+        localSse.disconnect();
+
+        expect(received, 1);
+      });
+    });
   });
 }
