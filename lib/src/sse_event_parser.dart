@@ -54,8 +54,9 @@ class SseEventParser extends StreamTransformerBase<String, SSEModel> {
       }
 
       final int colonIndex = line.indexOf(':');
-      final String field =
-          colonIndex == -1 ? line : line.substring(0, colonIndex);
+      final String field = colonIndex == -1
+          ? line
+          : line.substring(0, colonIndex);
       String value = colonIndex == -1 ? '' : line.substring(colonIndex + 1);
 
       // SSE spec dictates removing exactly one leading space if present.

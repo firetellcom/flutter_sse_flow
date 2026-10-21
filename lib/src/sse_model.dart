@@ -9,11 +9,7 @@ class SSEModel {
   /// The data payload of the event.
   String data;
 
-  SSEModel({
-    this.id = '',
-    this.event = '',
-    this.data = '',
-  });
+  SSEModel({this.id = '', this.event = '', this.data = ''});
 
   @override
   String toString() {

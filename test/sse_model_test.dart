@@ -4,14 +4,14 @@ import 'package:flutter_sse_flow/flutter_sse_flow.dart';
 void main() {
   group('SSEModel', () {
     test('should initialize with default values', () {
-      final model = SSEModel();
+      final SSEModel model = SSEModel();
       expect(model.id, '');
       expect(model.event, '');
       expect(model.data, '');
     });
 
     test('should initialize with provided values', () {
-      final model = SSEModel(
+      final SSEModel model = SSEModel(
         id: '123',
         event: 'message',
         data: '{"status": "ok"}',
@@ -22,11 +22,7 @@ void main() {
     });
 
     test('toString() should return correct format', () {
-      final model = SSEModel(
-        id: '1',
-        event: 'ping',
-        data: 'pong',
-      );
+      final SSEModel model = SSEModel(id: '1', event: 'ping', data: 'pong');
       expect(model.toString(), 'SSEModel(id: 1, event: ping, data: pong)');
     });
   });

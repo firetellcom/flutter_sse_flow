@@ -3,9 +3,9 @@ import 'package:flutter_sse_flow/src/sse_event_parser.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 Future<List<SSEModel>> parse(List<String> lines) {
-  return Stream<String>.fromIterable(lines)
-      .transform(const SseEventParser())
-      .toList();
+  return Stream<String>.fromIterable(
+    lines,
+  ).transform(const SseEventParser()).toList();
 }
 
 void main() {
@@ -67,10 +67,10 @@ void main() {
         '',
       ]);
 
-      expect(
-        events.map((SSEModel event) => event.data).toList(),
-        <String>['a', 'b'],
-      );
+      expect(events.map((SSEModel event) => event.data).toList(), <String>[
+        'a',
+        'b',
+      ]);
     });
 
     test('does not emit an event for keep-alive comment blocks', () async {
@@ -94,10 +94,10 @@ void main() {
         '',
       ]);
 
-      expect(
-        events.map((SSEModel event) => event.data).toList(),
-        <String>['a', 'b'],
-      );
+      expect(events.map((SSEModel event) => event.data).toList(), <String>[
+        'a',
+        'b',
+      ]);
     });
 
     test('ignores consecutive empty lines', () async {

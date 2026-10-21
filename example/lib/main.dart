@@ -59,14 +59,13 @@ class _SSEHomeScreenState extends State<SSEHomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final bool isActive = _sseClient.status != SseConnectionStatus.idle &&
+    final bool isActive =
+        _sseClient.status != SseConnectionStatus.idle &&
         _sseClient.status != SseConnectionStatus.disconnected &&
         _sseClient.status != SseConnectionStatus.unauthorized;
 
     return Scaffold(
-      appBar: AppBar(
-        title: Text('SSE Flow (${_sseClient.status.name})'),
-      ),
+      appBar: AppBar(title: Text('SSE Flow (${_sseClient.status.name})')),
       body: Column(
         children: <Widget>[
           Padding(
@@ -88,10 +87,12 @@ class _SSEHomeScreenState extends State<SSEHomeScreen> {
           Expanded(
             child: ListView.builder(
               itemCount: _events.length,
-              itemBuilder: (context, index) {
-                final event = _events[index];
+              itemBuilder: (BuildContext context, int index) {
+                final SSEModel event = _events[index];
                 return ListTile(
-                  title: Text(event.event.isEmpty ? 'Unknown Event' : event.event),
+                  title: Text(
+                    event.event.isEmpty ? 'Unknown Event' : event.event,
+                  ),
                   subtitle: Text(event.data.isEmpty ? 'No data' : event.data),
                 );
               },
@@ -100,5 +101,11 @@ class _SSEHomeScreenState extends State<SSEHomeScreen> {
         ],
       ),
     );
+  }
+
+  @override
+  void dispose() {
+    _sseClient.dispose();
+    super.dispose();
   }
 }

@@ -3,7 +3,7 @@
 [![pub package](https://img.shields.io/pub/v/flutter_sse_flow.svg)](https://pub.dev/packages/flutter_sse_flow)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/firetellcom/flutter_sse_flow/blob/main/LICENSE)
 
-A robust, simple, and standard-compliant Server-Sent Events (SSE) client package for Flutter and Dart. Designed with resilience, null-safety, and clean lifecycle management.
+A robust, enterprise-grade, standard-compliant Server-Sent Events (SSE) client for Flutter and Dart. Engineered with dynamic auth rotation, granular connection lifecycle monitoring, automatic `Last-Event-ID` resumption, and race-condition prevention.
 
 ---
 
@@ -17,35 +17,28 @@ A robust, simple, and standard-compliant Server-Sent Events (SSE) client package
 
 ## Why Flutter SSE Flow?
 
-Many existing SSE packages suffer from persistent reconnection loops, incorrect parsing of multi-line payloads, or rigid singleton architectures. **flutter_sse_flow** was built to solve these issues:
+Many existing SSE packages suffer from stale auth headers across reconnections, persistent tight loops on `401 Unauthorized`, race conditions during quick reconnects, or broken parsing of multi-line payloads. **flutter_sse_flow** provides an end-to-end resilient solution:
 
 1. **Standard-Compliant Parsing (W3C Spec):**
-   Uses `utf8.decoder` and `LineSplitter()` to process stream chunks line by line. Properly handles arbitrary field order, strips the optional leading space after colons, and correctly concatenates multi-line `data:` fields (essential for large payloads like LLM/AI streaming responses).
+   Uses `utf8.decoder` and `LineSplitter()` to parse streams line by line. Properly strips optional leading spaces after colons, concatenates multi-line `data:` payloads (essential for LLM/AI streaming responses), and ignores `:keep-alive` comments without emitting ghost events.
 
-2. **Clean Reconnection Logic (No Zombie Tasks):**
-   Operates on a controlled `while (_isConnected)` loop. Invoking `disconnect()` cleanly breaks the loop and aborts future retries, avoiding hidden background tasks and battery drain.
+2. **Dynamic Header Resolution & Token Rotation:**
+   Instead of capturing static headers at initialization, `headers` is a provider callback (`SseHeadersProvider`) evaluated before **every** connection attempt (initial and reconnects). Rotating tokens in the background seamlessly applies on the next reconnect.
 
-3. **Smart 401 Unauthorized Handling:**
-   If the server responds with HTTP `401 Unauthorized`, reconnection attempts stop immediately. This prevents token-spamming loops and allows your application to trigger a logout or token-refresh flow gracefully.
+3. **Auth-Aware Recovery (`onUnauthorized` & `maxAuthRetries`):**
+   Recovers from `401 Unauthorized` or `403 Forbidden` via an asynchronous `onUnauthorized` handler. Refresh your credentials and return `SseAuthDecision.retry` or `SseAuthDecision.stop`. Built-in `maxAuthRetries` (default 10) prevents infinite tight-loops and self-DDoS if credentials remain rejected.
 
-4. **Instance-Based Architecture:**
-   `FlutterSseFlow` is an instantiable class rather than a singleton. You can manage multiple concurrent, independent SSE streams in parallel without collisions.
+4. **Automatic `Last-Event-ID` Tracking:**
+   Tracks non-empty `id:` fields and automatically transmits the `Last-Event-ID` header on auto-reconnections, ensuring zero message loss across network drops.
 
-5. **Memory Leak Prevention:**
-   Closes the underlying `http.Client` and cancels stream subscriptions upon `disconnect()`, ensuring no dangling network sockets.
+5. **Granular Lifecycle Monitoring (`statusStream`):**
+   Track real-time connection state (`idle`, `connecting`, `connected`, `reconnecting`, `refreshingAuth`, `unauthorized`, `disconnected`).
 
-6. **100% Sound Null-Safety:**
-   `SSEModel` uses non-nullable `String` fields with empty string defaults (`''`), eliminating `NullPointerExceptions` when rendering data in your UI.
+6. **Race-Condition & Concurrency Prevention (`SseSession`):**
+   Calling `disconnect()` then `connect()` immediately cancels the previous connection lifecycle cleanly, preventing concurrent loops and duplicate message deliveries.
 
----
-
-## Features
-
-- Connect to any SSE stream with custom HTTP headers (e.g. `Authorization: Bearer <token>`).
-- Automatic reconnection with backoff upon network interruption.
-- Immediate teardown on `401 Unauthorized`.
-- Standard Dart `Stream<SSEModel>` interface.
-- Lightweight, zero heavy third-party dependencies (only `http`).
+7. **Clean Resource Teardown (`dispose`):**
+   Distinguishes between pausing a stream (`disconnect()`) and permanently freeing memory and stream controllers (`dispose()`).
 
 ---
 
@@ -55,7 +48,7 @@ Add `flutter_sse_flow` to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  flutter_sse_flow: ^0.0.1
+  flutter_sse_flow: ^0.1.0
 ```
 
 Or run:
@@ -77,53 +70,58 @@ import 'package:flutter_sse_flow/flutter_sse_flow.dart';
 ### 2. Instantiate the client
 
 ```dart
-final FlutterSseFlow _sseClient = FlutterSseFlow();
+final FlutterSseFlow _sseClient = FlutterSseFlow(
+  reconnectDelay: const Duration(seconds: 2),
+  maxAuthRetries: 10,
+);
 ```
 
-### 3. Listen to incoming events
-
-Listen to `sseStream` to process incoming `SSEModel` events:
+### 3. Listen to events and status
 
 ```dart
-@override
-void initState() {
-  super.initState();
+// Listen to incoming SSE messages
+_sseClient.sseStream.listen(
+  (SSEModel event) {
+    print('Event: ${event.event}, ID: ${event.id}, Data: ${event.data}');
+  },
+  onError: (Object error) {
+    print('Stream error: $error');
+  },
+);
 
-  _sseClient.sseStream.listen(
-    (SSEModel event) {
-      print('ID: ${event.id}');
-      print('Event: ${event.event}');
-      print('Data: ${event.data}');
-    },
-    onError: (error) {
-      print('Stream error: $error');
-    },
-  );
-}
+// Monitor connection lifecycle status
+_sseClient.statusStream.listen((SseConnectionStatus status) {
+  print('Current connection status: $status');
+});
 ```
 
-### 4. Connect to the stream
-
-Call `connect()` with the target URL and any optional headers:
+### 4. Connect with Dynamic Auth and 401 Recovery
 
 ```dart
 _sseClient.connect(
   url: 'https://api.example.com/v1/stream',
-  headers: {
-    'Authorization': 'Bearer YOUR_TOKEN_HERE',
-    'Accept': 'text/event-stream',
+  // Dynamic headers: re-evaluated on every connect/reconnect attempt
+  headers: () async => <String, String>{
+    'Authorization': 'Bearer ${await authService.getFreshAccessToken()}',
+  },
+  unauthorizedStatusCodes: const <int>{401, 403},
+  onUnauthorized: () async {
+    final bool refreshed = await authService.refreshToken();
+    return refreshed ? SseAuthDecision.retry : SseAuthDecision.stop;
   },
 );
 ```
 
-### 5. Disconnect and clean up
-
-When the stream is no longer needed (e.g., in `dispose()`), call `disconnect()`:
+### 5. Disconnect and Dispose
 
 ```dart
+// Temporary disconnect (can reconnect later via connect())
+_sseClient.disconnect();
+
+// Permanent disposal (e.g. inside a State's dispose() method)
 @override
 void dispose() {
-  _sseClient.disconnect();
+  _sseClient.dispose();
   super.dispose();
 }
 ```
@@ -136,10 +134,24 @@ void dispose() {
 
 | Member | Type | Description |
 |---|---|---|
+| `FlutterSseFlow({Duration reconnectDelay, int maxAuthRetries})` | Constructor | Creates a new client. Defaults: `reconnectDelay = 2s`, `maxAuthRetries = 10`. |
 | `sseStream` | `Stream<SSEModel>` | Broadcast stream emitting incoming server events. |
-| `isConnected` | `bool` | Current connection status (`true` if connected or actively reconnecting). |
-| `connect({required String url, Map<String, String>? headers})` | `void` | Connects to the SSE endpoint and begins processing data. |
-| `disconnect()` | `void` | Stops reconnection, closes the HTTP client, and releases resources. |
+| `status` | `SseConnectionStatus` | Current connection lifecycle status. |
+| `statusStream` | `Stream<SseConnectionStatus>` | Broadcast stream emitting connection lifecycle transitions. |
+| `lastEventId` | `String?` | The last received event ID sent on auto-reconnection. |
+| `connect(...)` | `void` | Connects to the SSE endpoint with optional dynamic headers and auth recovery. |
+| `disconnect()` | `void` | Closes active socket and aborts reconnect loop. Instance remains reusable. |
+| `dispose()` | `Future<void>` | Disconnects and closes internal stream controllers permanently. |
+
+### `SseConnectionStatus`
+
+- `idle`: Client has not connected yet.
+- `connecting`: Establishing HTTP connection to the SSE server.
+- `connected`: Actively connected and receiving events.
+- `reconnecting`: Network disconnected; waiting `reconnectDelay` before retrying.
+- `refreshingAuth`: Received 401/403; executing `onUnauthorized` handler.
+- `unauthorized`: Authentication failed or max retries exceeded; client stopped.
+- `disconnected`: Manually disconnected via `disconnect()`.
 
 ### `SSEModel`
 
@@ -151,9 +163,13 @@ void dispose() {
 
 ---
 
-## Example Application
+## Migration Guide (0.0.x ➔ 0.1.0)
 
-Check out the [`example/`](example/) folder for a complete, runnable Flutter app demo.
+1. **`headers` is now a provider function:**
+   - *Old:* `connect(url: url, headers: {'Authorization': 'Bearer ...'})`
+   - *New:* `connect(url: url, headers: () async => {'Authorization': 'Bearer ...'})`
+2. **Resource Cleanup:**
+   - Call `dispose()` when permanently destroying the client instead of only `disconnect()`.
 
 ---
 
@@ -161,45 +177,38 @@ Check out the [`example/`](example/) folder for a complete, runnable Flutter app
 
 ## Tại sao nên chọn Flutter SSE Flow?
 
-Nhiều package SSE hiện nay dễ gặp lỗi lặp kết nối vô hạn (tạo task chạy ngầm gây tốn pin), không ghép các dòng `data:` nhiều dòng theo chuẩn W3C, hoặc dùng singleton khiến khó quản lý nhiều luồng. **flutter_sse_flow** được thiết kế để khắc phục triệt để các hạn chế này:
+Nhiều package SSE hiện nay dễ gặp lỗi token hết hạn khi reconnect, vòng lặp spam request vô tận khi gặp `401 Unauthorized`, xung đột kết nối khi gọi `disconnect()` và `connect()` liên tục, hoặc không ghép các dòng `data:` nhiều dòng theo chuẩn W3C. **flutter_sse_flow** giải quyết triệt để toàn bộ các vấn đề này:
 
 1. **Phân tích cú pháp chuẩn SSE (W3C Standard):**
-   Sử dụng `utf8.decoder` kết hợp `LineSplitter()` đọc luồng dữ liệu theo từng dòng. Xử lý chính xác thứ tự trường bất kỳ, tự động bỏ khoảng trắng sau dấu hai chấm, và ghép nối các dòng `data:` liền nhau (đặc biệt hữu ích cho các payload JSON lớn hoặc stream chat từ LLM/AI).
+   Sử dụng `utf8.decoder` kết hợp `LineSplitter()` đọc luồng dữ liệu theo từng dòng. Tự động bỏ khoảng trắng sau dấu hai chấm, ghép nối các dòng `data:` nhiều dòng (chuẩn cho stream LLM/AI chat), và bỏ qua các dòng comment `:keep-alive` mà không bắn ra các event rỗng.
 
-2. **Cơ chế Reconnect tin cậy (Không lo Zombie Task):**
-   Vận hành trên vòng lặp `while (_isConnected)`. Khi gọi `disconnect()`, cờ kết nối lập tức chuyển thành `false` và thoát vòng lặp, bảo đảm tiến trình dọn dẹp sạch sẽ, không âm thầm chạy ngầm làm hao pin.
+2. **Cập nhật Header động & Xoay Token tự động:**
+   Tham số `headers` là một hàm callback (`SseHeadersProvider`) được thực thi lại trước **mỗi** lần kết nối và kết nối lại. Khi token được làm mới, kết nối tiếp theo sẽ tự động nhận token mới nhất.
 
-3. **Xử lý thông minh khi gặp lỗi 401 Unauthorized:**
-   Nếu server phản hồi mã HTTP `401`, client sẽ tự động dừng thử lại ngay lập tức. Điều này giúp ngăn ngừa việc spam request liên tục lên server và cho phép ứng dụng điều hướng người dùng đăng nhập lại hoặc làm mới token.
+3. **Khôi phục lỗi xác thực thông minh (`onUnauthorized` & `maxAuthRetries`):**
+   Khi server trả về mã 401/403, client sẽ gọi callback `onUnauthorized`. Bạn có thể làm mới token bất đồng bộ và trả về `SseAuthDecision.retry` để thử lại ngay, hoặc `SseAuthDecision.stop` để dừng hẳn. Cơ chế `maxAuthRetries` (mặc định 10 lần) ngăn ngừa hoàn toàn tình trạng spam request và tự DDoS server.
 
-4. **Kiến trúc Hướng đối tượng (Instance-based):**
-   `FlutterSseFlow` là class có thể khởi tạo nhiều lần. Bạn có thể mở đồng thời nhiều luồng kết nối SSE độc lập trong cùng một ứng dụng mà không lo xung đột.
+4. **Tự động lưu và gửi `Last-Event-ID`:**
+   Tự động ghi nhớ `id:` sự kiện gần nhất và gửi kèm header `Last-Event-ID` khi reconnect, giúp bảo đảm không bị mất mát dữ liệu khi chập chờn mạng.
 
-5. **Giải phóng tài nguyên & Chống rò rỉ bộ nhớ:**
-   Tự động đóng `http.Client` nội bộ và hủy các socket ngay khi gọi `disconnect()`.
+5. **Theo dõi vòng đời kết nối chi tiết (`statusStream`):**
+   Cung cấp stream trạng thái trực quan (`idle`, `connecting`, `connected`, `reconnecting`, `refreshingAuth`, `unauthorized`, `disconnected`).
 
-6. **Hỗ trợ Sound Null-Safety 100%:**
-   `SSEModel` sử dụng các trường kiểu `String` non-nullable kèm giá trị mặc định là chuỗi rỗng `''`, ngăn chặn triệt để lỗi `NullPointerException` khi render dữ liệu trên giao diện.
+6. **Chống xung đột Race Condition (`SseSession`):**
+   Khi gọi `disconnect()` rồi `connect()` liên tiếp, phiên cũ sẽ lập tức bị hủy bỏ thông qua Cancellation Token, không bao giờ xảy ra tình trạng 2 vòng lặp chạy song song gây trùng lặp tin nhắn.
 
----
-
-## Các tính năng chính
-
-- Kết nối tới luồng SSE hỗ trợ tùy biến HTTP headers (ví dụ: `Authorization: Bearer <token>`).
-- Tự động kết nối lại khi mất mạng hoặc rớt kết nối.
-- Dừng kết nối an toàn khi server trả về HTTP `401 Unauthorized`.
-- Dữ liệu cung cấp qua Dart `Stream<SSEModel>` broadcast tiện dụng.
-- Nhẹ nhàng, không phụ thuộc thư viện bên thứ ba cồng kềnh (chỉ dùng `http`).
+7. **Dọn dẹp bộ nhớ triệt để (`dispose`):**
+   Cung cấp hàm `dispose()` đóng vĩnh viễn các `StreamController` và socket kết nối.
 
 ---
 
 ## Cài đặt
 
-Thêm package vào file `pubspec.yaml` của bạn:
+Thêm package vào file `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  flutter_sse_flow: ^0.0.1
+  flutter_sse_flow: ^0.1.0
 ```
 
 Hoặc chạy lệnh:
@@ -210,7 +219,7 @@ flutter pub add flutter_sse_flow
 
 ---
 
-## Hướng dẫn sử dụng
+## Hướng dẫn sử dụng nhanh
 
 ### 1. Import package
 
@@ -221,53 +230,58 @@ import 'package:flutter_sse_flow/flutter_sse_flow.dart';
 ### 2. Khởi tạo client
 
 ```dart
-final FlutterSseFlow _sseClient = FlutterSseFlow();
+final FlutterSseFlow _sseClient = FlutterSseFlow(
+  reconnectDelay: const Duration(seconds: 2),
+  maxAuthRetries: 10,
+);
 ```
 
-### 3. Lắng nghe luồng sự kiện
-
-Lắng nghe `sseStream` để nhận các sự kiện `SSEModel` được gửi từ server:
+### 3. Lắng nghe dữ liệu và trạng thái
 
 ```dart
-@override
-void initState() {
-  super.initState();
+// Lắng nghe dữ liệu SSE từ server
+_sseClient.sseStream.listen(
+  (SSEModel event) {
+    print('Sự kiện: ${event.event}, ID: ${event.id}, Nội dung: ${event.data}');
+  },
+  onError: (Object error) {
+    print('Lỗi luồng: $error');
+  },
+);
 
-  _sseClient.sseStream.listen(
-    (SSEModel event) {
-      print('ID: ${event.id}');
-      print('Event: ${event.event}');
-      print('Data: ${event.data}');
-    },
-    onError: (error) {
-      print('Lỗi luồng stream: $error');
-    },
-  );
-}
+// Lắng nghe trạng thái kết nối
+_sseClient.statusStream.listen((SseConnectionStatus status) {
+  print('Trạng thái kết nối hiện tại: $status');
+});
 ```
 
-### 4. Kết nối tới server
-
-Gọi hàm `connect()` kèm URL và các headers cần thiết:
+### 4. Kết nối kèm Token động và Xử lý 401
 
 ```dart
 _sseClient.connect(
   url: 'https://api.example.com/v1/stream',
-  headers: {
-    'Authorization': 'Bearer YOUR_TOKEN_HERE',
-    'Accept': 'text/event-stream',
+  // Dynamic headers: tự động gọi lại mỗi lần kết nối lại
+  headers: () async => <String, String>{
+    'Authorization': 'Bearer ${await authService.getAccessToken()}',
+  },
+  unauthorizedStatusCodes: const <int>{401, 403},
+  onUnauthorized: () async {
+    final bool refreshed = await authService.refreshToken();
+    return refreshed ? SseAuthDecision.retry : SseAuthDecision.stop;
   },
 );
 ```
 
-### 5. Ngắt kết nối và giải phóng
-
-Khi không còn sử dụng (ví dụ khi widget bị hủy trong `dispose()`), hãy gọi `disconnect()`:
+### 5. Ngắt kết nối và Hủy tài nguyên
 
 ```dart
+// Tạm ngắt kết nối (vẫn có thể gọi connect() lại sau)
+_sseClient.disconnect();
+
+// Hủy vĩnh viễn (gọi trong hàm dispose() của Widget / Cubit)
 @override
 void dispose() {
-  _sseClient.disconnect();
+  _sseClient.dispose();
   super.dispose();
 }
 ```
@@ -280,24 +294,14 @@ void dispose() {
 
 | Thành phần | Kiểu | Mô tả |
 |---|---|---|
+| `FlutterSseFlow({Duration reconnectDelay, int maxAuthRetries})` | Constructor | Khởi tạo client với thời gian chờ kết nối lại (mặc định 2s) và giới hạn retry auth (mặc định 10). |
 | `sseStream` | `Stream<SSEModel>` | Broadcast stream phát ra các sự kiện SSE nhận từ server. |
-| `isConnected` | `bool` | Trạng thái kết nối hiện tại (`true` nếu đang kết nối hoặc đang tự động kết nối lại). |
-| `connect({required String url, Map<String, String>? headers})` | `void` | Bắt đầu kết nối đến endpoint SSE và nhận luồng dữ liệu. |
-| `disconnect()` | `void` | Hủy kết nối, đóng HTTP client và giải phóng toàn bộ tài nguyên. |
-
-### `SSEModel`
-
-| Thuộc tính | Kiểu | Mặc định | Mô tả |
-|---|---|---|---|
-| `id` | `String` | `''` | Mã định danh sự kiện. |
-| `event` | `String` | `''` | Tên/loại sự kiện. |
-| `data` | `String` | `''` | Dữ liệu nội dung (đã được tự động ghép nối theo chuẩn SSE nếu có nhiều dòng). |
-
----
-
-## Ứng dụng mẫu
-
-Tham khảo thư mục [`example/`](example/) để xem mã nguồn ví dụ ứng dụng Flutter hoàn chỉnh có thể chạy trực tiếp.
+| `status` | `SseConnectionStatus` | Trạng thái vòng đời kết nối hiện tại. |
+| `statusStream` | `Stream<SseConnectionStatus>` | Broadcast stream phát ra mỗi khi trạng thái kết nối thay đổi. |
+| `lastEventId` | `String?` | ID sự kiện gần nhất nhận được. |
+| `connect(...)` | `void` | Bắt đầu kết nối đến endpoint SSE kèm headers động và handler 401. |
+| `disconnect()` | `void` | Tạm ngắt kết nối và giải phóng HTTP socket. Có thể kết nối lại sau. |
+| `dispose()` | `Future<void>` | Ngắt kết nối và đóng vĩnh viễn toàn bộ các stream controller. |
 
 ---
 
