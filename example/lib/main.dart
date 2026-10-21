@@ -27,16 +27,18 @@ class SSEHomeScreen extends StatefulWidget {
 
 class _SSEHomeScreenState extends State<SSEHomeScreen> {
   final FlutterSseFlow _sseClient = FlutterSseFlow();
-  final List<SSEModel> _events = [];
+  final List<SSEModel> _events = <SSEModel>[];
 
   @override
   void initState() {
     super.initState();
-    // Listen to the global stream
-    _sseClient.sseStream.listen((event) {
+    _sseClient.sseStream.listen((SSEModel event) {
       setState(() {
         _events.insert(0, event);
       });
+    });
+    _sseClient.statusStream.listen((SseConnectionStatus status) {
+      setState(() {});
     });
   }
 
@@ -44,7 +46,7 @@ class _SSEHomeScreenState extends State<SSEHomeScreen> {
     // Example URL. Replace with a real SSE endpoint to test.
     _sseClient.connect(
       url: 'https://api.example.com/v1/stream',
-      headers: {
+      headers: () => <String, String>{
         'Authorization': 'Bearer YOUR_TOKEN_HERE',
       },
     );
@@ -52,28 +54,32 @@ class _SSEHomeScreenState extends State<SSEHomeScreen> {
 
   void _disconnect() {
     _sseClient.disconnect();
-    setState(() {}); // to update UI
+    setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
+    final bool isActive = _sseClient.status != SseConnectionStatus.idle &&
+        _sseClient.status != SseConnectionStatus.disconnected &&
+        _sseClient.status != SseConnectionStatus.unauthorized;
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('SSE Flow Example'),
+        title: Text('SSE Flow (${_sseClient.status.name})'),
       ),
       body: Column(
-        children: [
+        children: <Widget>[
           Padding(
             padding: const EdgeInsets.all(8.0),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
+              children: <Widget>[
                 ElevatedButton(
-                  onPressed: _sseClient.isConnected ? null : _connect,
+                  onPressed: isActive ? null : _connect,
                   child: const Text('Connect'),
                 ),
                 ElevatedButton(
-                  onPressed: _sseClient.isConnected ? _disconnect : null,
+                  onPressed: isActive ? _disconnect : null,
                   child: const Text('Disconnect'),
                 ),
               ],
